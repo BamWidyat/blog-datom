@@ -7,7 +7,7 @@
             [io.pedestal.interceptor :refer [interceptor]]
             [hiccup.core :as hc]
             #_[clojure.core.async :refer (<!!)]
-            [datomic.api :as client]))
+            [datomic.api :as d]))
 
 ;;========================================================================
 
@@ -25,10 +25,10 @@
   "datomic:mem://firstdb")
 
 (defn create-database []
-  (client/create-database uri))
+  (d/create-database uri))
 
 (defn conn []
-  (client/connect uri))
+  (d/connect uri))
 
 (def schema
   [{:db/ident :post/id
@@ -40,65 +40,80 @@
     :db/cardinality :db.cardinality/one}
    {:db/ident :post/content
     :db/valueType :db.type/string
+    :db/cardinality :db.cardinality/one}
+   {:db/ident :post/time
+    :db/valueType :db.type/instant
     :db/cardinality :db.cardinality/one}])
 
 (defn insert-schema []
-  (client/transact (conn) schema))
+  (d/transact (conn) schema))
 
 (defn create-post-database [title content]
-  (client/transact
+  (d/transact
    (conn)
-   [{:post/id (client/squuid)
+   [{:post/id (d/squuid)
      :post/title (str title)
-     :post/content (str content)}]))
+     :post/content (str content)
+     :post/time (new java.util.Date)}]))
 
 (defn take-database []
-  (client/q '[:find ?id ?title ?content
+  (d/q '[:find ?id ?title ?content ?time
               :where
               [?e :post/title ?title]
               [?e :post/id ?id]
-              [?e :post/content ?content]]
-            (client/db (conn))))
+              [?e :post/content ?content]
+              [?e :post/time ?time]]
+            (d/db (conn))))
 
 (defn take-database-id []
-  (client/q '[:find ?id
+  (d/q '[:find ?id
               :where
               [?e :post/id ?id]]
-            (client/db (conn))))
+            (d/db (conn))))
 
 (defn take-post-by-id [id]
-  (client/q '[:find ?title ?content
+  (d/q '[:find ?title ?content ?time
               :in $ ?id
               :where
               [?e :post/id ?id]
               [?e :post/title ?title]
-              [?e :post/content ?content]]
-            (client/db (conn)) id))
+              [?e :post/content ?content]
+              [?e :post/time ?time]]
+            (d/db (conn)) id))
 
-(defn delete-post-database [id title content]
-  (client/transact
+(defn delete-post-database [id title content tm]
+  (d/transact
    (conn)
    [[:db/retract [:post/id id]
      :post/id id
      :post/title title
-     :post/content content]]))
+     :post/content content
+     :post/time tm]]))
 
 (defn edit-post-database [id title content]
-  (client/transact
+  (d/transact
    (conn)
    [[:db/add [:post/id id]
      :post/title title]
     [:db/add [:post/id id]
      :post/content content]]))
 
+(defn take-database-time-id []
+  (d/q '[:find ?time ?id
+         :where
+         [?e :post/time ?time]
+         [?e :post/id ?id]]
+       (d/db (conn))))
+
 ;;==========================================================================
 
 (defn post-list [id]
-  (for [postid (flatten (into [] (take-database-id)))]
+  (for [time-id (sort (take-database-time-id))]
     [:div {:class "col-sm-4"}
-     [:h5 [:small (str "Post ID: " (str postid))]]
-     [:a {:href (str "/post/" postid)} [:h3 (first (first (take-post-by-id postid)))]]
-     (second (first (take-post-by-id postid)))[:br][:br]]))
+     [:h5 [:small (str "Post ID: " (str (last time-id)))]]
+     [:a {:href (str "/post/" (last time-id))} [:h3 (first (first (take-post-by-id (last time-id))))]]
+     [:h5 [:small (str "Posted at " (first time-id))]]
+     (second (first (take-post-by-id (last time-id))))[:br][:br]]))
 
 (defn bootstrap []
   (for [cnt (range 4)]
@@ -177,9 +192,11 @@
       [:a {:href "/new" :class "btn btn-primary"} "New Post"]
       [:a {:href "/" :class "btn btn-primary"} "Home"]]]]])
 
-(defn view-post-content [id title content]
+(defn view-post-content [id title content tm]
   [[:div {:class "container"}
     [:h1 [:strong (str title)]]
+    [:h5 [:small (str "Posted at " tm)]]
+    [:h5 [:small (str "Post ID: " id)]]
     [:br]
     (str content)
     [:br][:br]
@@ -243,9 +260,9 @@
   (make-html
    0 "Post Successfully Created!" post-ok-content))
 
-(defn view-post-html [id title content]
+(defn view-post-html [id title content tm]
   (make-html
-   0 title (view-post-content id title content)))
+   0 title (view-post-content id title content tm)))
 
 (defn edit-post-html [id title content]
   (make-html
@@ -305,7 +322,8 @@
                  false)
             title (first (first (take-post-by-id id)))
             content (second (first (take-post-by-id id)))
-            response {:status 200 :body (view-post-html id title content)}]
+            tm (last (first (take-post-by-id id)))
+            response {:status 200 :body (view-post-html id title content tm)}]
         (if (= id false)
           (assoc context :response {:status 404 :body "No Page Found"})
           (assoc context :response response))))}))
@@ -360,8 +378,9 @@
             id (java.util.UUID/fromString (str postid))
             title (first (first (take-post-by-id id)))
             content (second (first (take-post-by-id id)))
+            tm (last (first (take-post-by-id id)))
             response {:status 200 :body delete-ok-html}]
-        (delete-post-database id title content)
+        (delete-post-database id title content tm)
         (assoc context :response response)))}))
 
 
